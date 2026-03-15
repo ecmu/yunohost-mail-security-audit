@@ -336,6 +336,22 @@ cat > "$HTML_FILE" << 'HTMLEOF'
         details tr td { padding: 12px 16px; }
         .details-row td { padding: 0 !important; border-bottom: none !important; background: transparent !important; }
         .details-row:hover { background: transparent !important; }
+        /* ── Détails bannissements historique ── */
+        .ban-details { background: #fff7ed; border-radius: 10px; margin: 4px 0 8px 0; border: 1px solid #fed7aa; overflow: hidden; }
+        .ban-details summary { cursor: pointer; padding: 10px 14px; font-size: 13px; font-weight: 600; color: #c2410c; background: #ffedd5; list-style: none; display: flex; align-items: center; gap: 8px; user-select: none; transition: background 0.2s; }
+        .ban-details summary::-webkit-details-marker { display: none; }
+        .ban-details summary::before { content: '▶'; font-size: 10px; transition: transform 0.2s; }
+        .ban-details[open] summary::before { transform: rotate(90deg); }
+        .ban-details summary:hover { background: #fed7aa; }
+        .ban-detail-body { padding: 0 14px 12px 14px; }
+        .ban-log-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+        .ban-log-table th { background: #ea580c; color: white; padding: 6px 10px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+        .ban-log-table td { padding: 6px 10px; border-bottom: 1px solid #fed7aa; color: #374151; vertical-align: top; }
+        .ban-log-table tr:last-child td { border-bottom: none; }
+        .ban-log-table tbody tr:nth-child(odd) { background: #fff7ed; }
+        .ban-log-table tbody tr:hover { background: #ffedd5; }
+        .ban-jail-tag { display: inline-block; padding: 2px 8px; border-radius: 10px; background: #fee2e2; color: #b91c1c; font-weight: 600; font-size: 11px; }
+        .ban-duration { font-family: monospace; color: #9a3412; font-size: 11px; }
     </style>
 </head>
 <body>
@@ -365,6 +381,7 @@ cat > "$HTML_FILE" << 'HTMLEOF'
             <div class="section"><h2 class="section-title">📧 Top 5 des Expéditeurs</h2><div class="table-container"><table><thead><tr><th>Expéditeur</th><th>Mails envoyés</th><th>Type</th></tr></thead><tbody>TOP_SENDERS_PLACEHOLDER</tbody></table></div></div>
             <div class="section"><h2 class="section-title">📬 Top 5 des Destinataires</h2><div class="table-container"><table><thead><tr><th>Destinataire</th><th>Mails reçus</th><th>Type</th></tr></thead><tbody>TOP_RECIPIENTS_PLACEHOLDER</tbody></table></div></div>
             <div class="section"><h2 class="section-title">🚫 IPs Actuellement Bannies</h2><div class="table-container"><table><thead><tr><th>Jail</th><th>IPs Bannies</th></tr></thead><tbody>BANNED_IPS_PLACEHOLDER</tbody></table></div></div>
+            <div class="section"><h2 class="section-title">📋 Historique des Bannissements (tous jails)</h2><div class="table-container"><table><thead><tr><th>Adresse IP</th><th>Pays</th><th>Bannissements</th><th>Statut</th></tr></thead><tbody>BAN_HISTORY_PLACEHOLDER</tbody></table></div></div>
         </div>
         <div class="footer"><p>Rapport généré automatiquement par <strong>Mail Security Audit v1.3.1</strong></p><p>Serveur YunoHost • Fail2ban • Postfix • Dovecot • GeoIP</p></div>
     </div>
@@ -590,6 +607,130 @@ for jail in postfix sasl dovecot sshd recidive; do
 done
 [ -z "$BANNED_IPS_HTML" ] && BANNED_IPS_HTML='<tr><td colspan="2" style="text-align:center; color: #10b981;">Aucune IP bannie actuellement ✓</td></tr>'
 sed -i "s|BANNED_IPS_PLACEHOLDER|$BANNED_IPS_HTML|g" "$HTML_FILE"
+
+# Historique distinct des IPs bannies tous jails confondus, trié par nombre de bannissements décroissants
+# Collecte des événements détaillés : "timestamp_epoch jail ip ban_datetime"
+BAN_HISTORY_HTML=""
+if systemctl is-active --quiet fail2ban; then
+    declare -A ban_count_map   # ip -> nombre de bannissements
+    # Fichier temporaire : chaque ligne = "epoch jail ip ban_datetime_display"
+    BAN_EVENTS_TMP=$(mktemp)
+
+    for jail in postfix sasl dovecot sshd recidive; do
+        if fail2ban-client status "$jail" &>/dev/null; then
+            # Lire toutes les lignes Ban pour ce jail (logs courant + rotation)
+            grep -h "" /var/log/fail2ban.log.1 /var/log/fail2ban.log 2>/dev/null | \
+            grep -v "Unban" | \
+            grep "Ban " | \
+            grep -E "\[$jail\]" | \
+            while IFS= read -r banline; do
+                # Format log fail2ban : "2024-01-15 03:22:11,456 fail2ban.actions [PID]: NOTICE [jail] Ban IP"
+                BAN_DT_RAW=$(echo "$banline" | awk '{print $1, $2}' | cut -d',' -f1)
+                BAN_IP=$(echo "$banline" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | tail -1)
+                [ -z "$BAN_IP" ] || [ -z "$BAN_DT_RAW" ] && continue
+
+                BAN_EPOCH=$(date -d "$BAN_DT_RAW" +%s 2>/dev/null) || continue
+                BAN_DT_DISPLAY=$(date -d "$BAN_DT_RAW" '+%d/%m/%Y %H:%M:%S' 2>/dev/null || echo "$BAN_DT_RAW")
+
+                # Chercher le Unban correspondant (même jail, même IP, après le Ban)
+                UNBAN_DT_RAW=$(grep -h "" /var/log/fail2ban.log.1 /var/log/fail2ban.log 2>/dev/null | \
+                    grep "Unban $BAN_IP" | \
+                    grep -E "\[$jail\]" | \
+                    awk '{print $1, $2}' | cut -d',' -f1 | \
+                    while IFS= read -r dt; do
+                        ep=$(date -d "$dt" +%s 2>/dev/null) || continue
+                        [ "$ep" -gt "$BAN_EPOCH" ] && echo "$ep $dt"
+                    done | sort -n | head -1 | awk '{$1=""; print $0}' | xargs)
+
+                if [ -n "$UNBAN_DT_RAW" ]; then
+                    UNBAN_EPOCH=$(date -d "$UNBAN_DT_RAW" +%s 2>/dev/null || echo 0)
+                    DURATION_SEC=$(( UNBAN_EPOCH - BAN_EPOCH ))
+                    if [ "$DURATION_SEC" -ge 86400 ]; then
+                        DURATION_DISPLAY="$((DURATION_SEC/86400))j $((DURATION_SEC%86400/3600))h"
+                    elif [ "$DURATION_SEC" -ge 3600 ]; then
+                        DURATION_DISPLAY="$((DURATION_SEC/3600))h $((DURATION_SEC%3600/60))min"
+                    elif [ "$DURATION_SEC" -ge 60 ]; then
+                        DURATION_DISPLAY="$((DURATION_SEC/60))min $((DURATION_SEC%60))s"
+                    else
+                        DURATION_DISPLAY="${DURATION_SEC}s"
+                    fi
+                else
+                    DURATION_DISPLAY="En cours / inconnu"
+                fi
+
+                echo "$BAN_EPOCH $jail $BAN_IP $BAN_DT_DISPLAY|$DURATION_DISPLAY" >> "$BAN_EVENTS_TMP"
+            done
+        fi
+    done
+
+    # Compter les bannissements par IP à partir des événements collectés
+    while IFS= read -r ev; do
+        [ -z "$ev" ] && continue
+        ev_ip=$(echo "$ev" | awk '{print $3}')
+        ban_count_map["$ev_ip"]=$(( ${ban_count_map["$ev_ip"]:-0} + 1 ))
+    done < "$BAN_EVENTS_TMP"
+
+    # Trier les IPs par nombre de bannissements décroissants
+    BAN_HISTORY_SORTED=$(for ip in "${!ban_count_map[@]}"; do
+        echo "${ban_count_map[$ip]} $ip"
+    done | sort -rn | head -20)
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        BH_COUNT=$(echo "$line" | awk '{print $1}')
+        BH_IP=$(echo "$line" | awk '{print $2}')
+        BH_COUNTRY=$(get_country "$BH_IP")
+
+        if [ "$BH_COUNT" -gt 10 ]; then
+            BH_BADGE='<span class="badge badge-danger">Récidiviste</span>'
+        elif [ "$BH_COUNT" -gt 3 ]; then
+            BH_BADGE='<span class="badge badge-warning">Répété</span>'
+        else
+            BH_BADGE='<span class="badge badge-info">Ponctuel</span>'
+        fi
+
+        # ── Détail des bannissements pour cette IP (max 20, triés par date décroissante) ──
+        BH_DETAIL_ROWS=""
+        while IFS= read -r ev; do
+            ev_jail=$(echo "$ev" | awk '{print $2}')
+            # Champs fixes : epoch jail ip — le reste est "date heure|durée"
+            ev_after3=$(echo "$ev" | cut -d' ' -f4-)
+            ev_dt_display=$(echo "$ev_after3" | cut -d'|' -f1)
+            ev_duration=$(echo "$ev_after3" | cut -d'|' -f2)
+            BH_DETAIL_ROWS+="<tr>"
+            BH_DETAIL_ROWS+="<td><code>$BH_IP</code></td>"
+            BH_DETAIL_ROWS+="<td><span class=\"ban-jail-tag\">$ev_jail</span></td>"
+            BH_DETAIL_ROWS+="<td class=\"log-time\">$ev_dt_display</td>"
+            BH_DETAIL_ROWS+="<td class=\"ban-duration\">$ev_duration</td>"
+            BH_DETAIL_ROWS+="</tr>"
+        done <<< "$(grep " $BH_IP " "$BAN_EVENTS_TMP" | sort -rn | head -20)"
+
+        [ -z "$BH_DETAIL_ROWS" ] && BH_DETAIL_ROWS='<tr><td colspan="5" style="text-align:center;color:#9ca3af;">Aucun détail disponible</td></tr>'
+
+        BH_DETAILS_HTML="<details class=\"ban-details\">"
+        BH_DETAILS_HTML+="<summary>🔍 Voir le détail des bannissements ($BH_COUNT au total, 20 derniers affichés)</summary>"
+        BH_DETAILS_HTML+="<div class=\"ban-detail-body\">"
+        BH_DETAILS_HTML+="<table class=\"ban-log-table\"><thead><tr><th>Adresse IP</th><th>Jail</th><th>Date de début</th><th>Durée du bannissement</th></tr></thead>"
+        BH_DETAILS_HTML+="<tbody>$BH_DETAIL_ROWS</tbody></table>"
+        BH_DETAILS_HTML+="</div></details>"
+
+        # Ligne principale
+        BAN_HISTORY_HTML+="<tr>"
+        BAN_HISTORY_HTML+="<td><strong>$BH_IP</strong></td>"
+        BAN_HISTORY_HTML+="<td>$BH_COUNTRY</td>"
+        BAN_HISTORY_HTML+="<td>$BH_COUNT</td>"
+        BAN_HISTORY_HTML+="<td>$BH_BADGE</td>"
+        BAN_HISTORY_HTML+="</tr>"
+        # Ligne dépliable (colspan=4)
+        BAN_HISTORY_HTML+="<tr class=\"details-row\">"
+        BAN_HISTORY_HTML+="<td colspan=\"4\" style=\"padding: 0 16px 8px 16px; background: #fffbf5;\">$BH_DETAILS_HTML</td>"
+        BAN_HISTORY_HTML+="</tr>"
+    done <<< "$BAN_HISTORY_SORTED"
+
+    rm -f "$BAN_EVENTS_TMP"
+fi
+[ -z "$BAN_HISTORY_HTML" ] && BAN_HISTORY_HTML='<tr><td colspan="4" style="text-align:center; color: #10b981;">Aucun historique de bannissement disponible ✓</td></tr>'
+sed -i "s|BAN_HISTORY_PLACEHOLDER|$BAN_HISTORY_HTML|g" "$HTML_FILE"
 
 if [ -n "$ALERT_EMAIL" ]; then
     if command -v mutt &> /dev/null; then
