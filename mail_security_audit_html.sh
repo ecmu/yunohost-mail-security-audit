@@ -494,16 +494,14 @@ while IFS= read -r line; do
             ATTACK_ROWS+="<td><span class=\"log-method\">$LOG_METHOD</span></td>"
             ATTACK_ROWS+="<td class=\"log-user\">$LOG_USER</td>"
             ATTACK_ROWS+="</tr>"
-        done <<< "$(cat /var/log/mail.log.1 /var/log/mail.log 2>/dev/null | \
-            grep "$IP" | grep "auth=0" | \
-            tail -20)"
+        done <<< "$(cat /var/log/mail.log.1 /var/log/mail.log 2>/dev/null | grep "$IP" | grep "auth=0" | sort -rn | head -20)"
 
         if [ -z "$ATTACK_ROWS" ]; then
             ATTACK_ROWS='<tr><td colspan="4" style="text-align:center;color:#9ca3af;">Aucun détail disponible</td></tr>'
         fi
 
         DETAILS_HTML="<details class=\"attack-details\">"
-        DETAILS_HTML+="<summary>🔍 Voir le détail des tentatives ($COUNT au total, 20 dernières affichées)</summary>"
+        DETAILS_HTML+="<summary>🔍 Détail des tentatives (20 dernières affichées)</summary>"
         DETAILS_HTML+="<div class=\"attack-detail-body\">"
         DETAILS_HTML+="<table class=\"attack-log-table\"><thead><tr><th>Date / Heure</th><th>Service</th><th>Méthode</th><th>Utilisateur tenté</th></tr></thead>"
         DETAILS_HTML+="<tbody>$ATTACK_ROWS</tbody></table>"
@@ -708,7 +706,7 @@ if systemctl is-active --quiet fail2ban; then
         [ -z "$BH_DETAIL_ROWS" ] && BH_DETAIL_ROWS='<tr><td colspan="5" style="text-align:center;color:#9ca3af;">Aucun détail disponible</td></tr>'
 
         BH_DETAILS_HTML="<details class=\"ban-details\">"
-        BH_DETAILS_HTML+="<summary>🔍 Voir le détail des bannissements ($BH_COUNT au total, 20 derniers affichés)</summary>"
+        BH_DETAILS_HTML+="<summary>🔍 Détail des bannissements (20 derniers affichés)</summary>"
         BH_DETAILS_HTML+="<div class=\"ban-detail-body\">"
         BH_DETAILS_HTML+="<table class=\"ban-log-table\"><thead><tr><th>Adresse IP</th><th>Jail</th><th>Date de début</th><th>Durée du bannissement</th></tr></thead>"
         BH_DETAILS_HTML+="<tbody>$BH_DETAIL_ROWS</tbody></table>"
@@ -732,6 +730,7 @@ fi
 [ -z "$BAN_HISTORY_HTML" ] && BAN_HISTORY_HTML='<tr><td colspan="4" style="text-align:center; color: #10b981;">Aucun historique de bannissement disponible ✓</td></tr>'
 sed -i "s|BAN_HISTORY_PLACEHOLDER|$BAN_HISTORY_HTML|g" "$HTML_FILE"
 
+#Envoie le mail
 if [ -n "$ALERT_EMAIL" ]; then
     if command -v mutt &> /dev/null; then
         mutt -e "set content_type=text/html" -s "$SUBJECT" "$ALERT_EMAIL" < "$HTML_FILE"
@@ -745,5 +744,6 @@ else
     echo "ERREUR : Veuillez configurer ALERT_EMAIL dans le script (ligne 16)"
 fi
 
+#Supprime les plus anciens emails créés (ne conserve que les 30 derniers jours)
 find /tmp -name "mail_security_report_*.html" -mtime +30 -delete 2>/dev/null
 exit 0
